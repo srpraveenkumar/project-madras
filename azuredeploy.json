@@ -1,0 +1,477 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logic-app-name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "metadata": {
+        "description": "Name of the Logic App."
+      }
+    },
+    "deployment-location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "allowedValues": [
+        "eastasia",
+        "southeastasia",
+        "centralus",
+        "eastus",
+        "eastus2",
+        "westus",
+        "northcentralus",
+        "southcentralus",
+        "northeurope",
+        "westeurope",
+        "japanwest",
+        "japaneast",
+        "brazilsouth",
+        "australiaeast",
+        "australiasoutheast",
+        "southindia",
+        "centralindia",
+        "westindia",
+        "canadacentral",
+        "canadaeast",
+        "westcentralus",
+        "westus2",
+        "[resourceGroup().location]"
+      ],
+      "metadata": {
+        "description": "Location of the Logic App."
+      }
+    },
+    "azureblob_Connection_Name": {
+      "type": "string",
+      "defaultValue": "azureblob"
+    },
+    "azureblob_Connection_DisplayName": {
+      "type": "string",
+      "defaultValue": "azure-blob-input"
+    },
+    "azureblob_accountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the storage account the connector should use."
+      },
+      "defaultValue": "integrationdevelopment"
+    },
+    "azureblob_accessKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Specify a valid primary/secondary storage account access key."
+      }
+    },
+    "dynamicsax_Connection_Name": {
+      "type": "string",
+      "defaultValue": "dynamicsax-1"
+    },
+    "dynamicsax_Connection_DisplayName": {
+      "type": "string",
+      "defaultValue": "user@domain.com"
+    }
+  },
+  "variables": {},
+  "resources": [
+    {
+      "name": "[parameters('logic-app-name')]",
+      "type": "Microsoft.Logic/workflows",
+      "location": "[parameters('deployment-location')]",
+      "apiVersion": "2016-06-01",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/connections', parameters('dynamicsax_Connection_Name'))]",
+        "[resourceId('Microsoft.Web/connections', parameters('azureblob_Connection_Name'))]"
+      ],
+      "tags": {
+        "displayName": "azure-blob-storage-to-d365"
+      },
+      "properties": {
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "actions": {
+            "Add_file_to_D365_Blob_stoage": {
+              "type": "Scope",
+              "actions": {
+                "Get_D365_Azure_Write_Url": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "api": {
+                        "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/dynamicsax"
+                      },
+                      "connection": {
+                        "name": "@parameters('$connections')['dynamicsax']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "path": "/datasets/@{encodeURIComponent(encodeURIComponent('pw1611update52026a079d0964c2faos.cloudax.dynamics.com'))}/procedures/@{encodeURIComponent(encodeURIComponent('DataManagementDefinitionGroups/Microsoft.Dynamics.DataEntities.GetAzureWriteUrl'))}",
+                    "body": {
+                      "uniqueFileName": "@{triggerBody()?['Id']}"
+                    }
+                  },
+                  "runAfter": {}
+                },
+                "D365_Azure_Write_Url_Output": {
+                  "type": "ParseJson",
+                  "inputs": {
+                    "content": "@body('Get_D365_Azure_Write_Url')?['value']",
+                    "schema": {
+                      "properties": {
+                        "BlobId": {
+                          "type": "string"
+                        },
+                        "BlobUrl": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  },
+                  "runAfter": {
+                    "Get_D365_Azure_Write_Url": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Upload_to_D365_Azure_Blob_Storage": {
+                  "type": "Http",
+                  "inputs": {
+                    "method": "PUT",
+                    "uri": "@{body('D365_Azure_Write_Url_Output')?['BlobUrl']}",
+                    "headers": {
+                      "Content-Type": "application/octet-stream",
+                      "x-ms-blob-type": "BlockBlob",
+                      "x-ms-version": "2015-02-21",
+                      " x-ms-date": "@utcnow('R')"
+                    },
+                    "body": "@body('Get_blob_content_using_path')"
+                  },
+                  "runAfter": {
+                    "Get_blob_content_using_path": [
+                      "Succeeded"
+                    ]
+                  }
+                },
+                "Get_blob_content_using_path": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "api": {
+                        "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/azureblob"
+                      },
+                      "connection": {
+                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                      }
+                    },
+                    "method": "get",
+                    "path": "/datasets/default/GetFileContentByPath",
+                    "queries": {
+                      "path": "@{body('Move_file_into_processing')?['Path']}",
+                      "inferContentType": true
+                    }
+                  },
+                  "runAfter": {
+                    "D365_Azure_Write_Url_Output": [
+                      "Succeeded"
+                    ]
+                  }
+                }
+              },
+              "runAfter": {
+                "Move_blob_to_processing": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Initiate_package_import_on_D365": {
+              "type": "Scope",
+              "actions": {
+                "Initiate_Import_from_package": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "api": {
+                        "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/dynamicsax"
+                      },
+                      "connection": {
+                        "name": "@parameters('$connections')['dynamicsax']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "path": "/datasets/@{encodeURIComponent(encodeURIComponent('pw1611update52026a079d0964c2faos.cloudax.dynamics.com'))}/procedures/@{encodeURIComponent(encodeURIComponent('DataManagementDefinitionGroups/Microsoft.Dynamics.DataEntities.ImportFromPackage'))}",
+                    "body": {
+                      "packageUrl": "@{body('D365_Azure_Write_Url_Output')?['BlobUrl']}",
+                      "definitionGroupId": "IntegrationFlow01",
+                      "execute": true,
+                      "overwrite": true,
+                      "legalEntityId": "usmf"
+                    }
+                  },
+                  "runAfter": {}
+                }
+              },
+              "runAfter": {
+                "Add_file_to_D365_Blob_stoage": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Check_Status": {
+              "type": "Until",
+              "expression": "@contains(body('Check_Execution_Status')?['value'], 'Succeeded')",
+              "limit": {
+                "count": 60,
+                "timeout": "PT1H"
+              },
+              "actions": {
+                "Check_Execution_Status": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "api": {
+                        "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/dynamicsax"
+                      },
+                      "connection": {
+                        "name": "@parameters('$connections')['dynamicsax']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "path": "/datasets/@{encodeURIComponent(encodeURIComponent('pw1611update52026a079d0964c2faos.cloudax.dynamics.com'))}/procedures/@{encodeURIComponent(encodeURIComponent('DataManagementDefinitionGroups/Microsoft.Dynamics.DataEntities.GetExecutionSummaryStatus'))}",
+                    "body": {
+                      "executionId": "@{body('Initiate_Import_from_package')?['value']}"
+                    }
+                  },
+                  "runAfter": {}
+                }
+              },
+              "runAfter": {
+                "Initiate_package_import_on_D365": [
+                  "Succeeded"
+                ]
+              }
+            },
+            "Condition": {
+              "type": "If",
+              "expression": "@equals(body('Check_Execution_Status')?['value'], 'Succeeded')",
+              "actions": {
+                "Move_blob_to_success": {
+                  "type": "Scope",
+                  "actions": {
+                    "Copy_blob_to_success": {
+                      "type": "ApiConnection",
+                      "inputs": {
+                        "host": {
+                          "api": {
+                            "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/azureblob"
+                          },
+                          "connection": {
+                            "name": "@parameters('$connections')['azureblob']['connectionId']"
+                          }
+                        },
+                        "method": "post",
+                        "path": "/datasets/default/copyFile",
+                        "queries": {
+                          "source": "@{body('Move_file_into_processing')?['Path']}",
+                          "destination": "/success",
+                          "overwrite": false
+                        }
+                      },
+                      "runAfter": {}
+                    }
+                  },
+                  "runAfter": {}
+                }
+              },
+              "runAfter": {
+                "Check_Status": [
+                  "Succeeded"
+                ]
+              },
+              "else": {
+                "actions": {
+                  "Move_blob_to_error": {
+                    "type": "Scope",
+                    "actions": {
+                      "Copy_blob_to_error": {
+                        "type": "ApiConnection",
+                        "inputs": {
+                          "host": {
+                            "api": {
+                              "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/azureblob"
+                            },
+                            "connection": {
+                              "name": "@parameters('$connections')['azureblob']['connectionId']"
+                            }
+                          },
+                          "method": "post",
+                          "path": "/datasets/default/copyFile",
+                          "queries": {
+                            "source": "@{body('Move_file_into_processing')?['Path']}",
+                            "destination": "/error",
+                            "overwrite": true
+                          }
+                        },
+                        "runAfter": {}
+                      }
+                    },
+                    "runAfter": {}
+                  }
+                }
+              }
+            },
+            "Move_blob_to_processing": {
+              "type": "Scope",
+              "actions": {
+                "Move_file_into_processing": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "api": {
+                        "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/azureblob"
+                      },
+                      "connection": {
+                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                      }
+                    },
+                    "method": "post",
+                    "path": "/datasets/default/copyFile",
+                    "queries": {
+                      "source": "@{triggerBody()?['Path']}",
+                      "destination": "/processing",
+                      "overwrite": true
+                    }
+                  },
+                  "runAfter": {}
+                },
+                "Delete_blob_from_input": {
+                  "type": "ApiConnection",
+                  "inputs": {
+                    "host": {
+                      "api": {
+                        "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/azureblob"
+                      },
+                      "connection": {
+                        "name": "@parameters('$connections')['azureblob']['connectionId']"
+                      }
+                    },
+                    "method": "delete",
+                    "path": "/datasets/default/files/@{encodeURIComponent(encodeURIComponent(triggerBody()?['Path']))}"
+                  },
+                  "runAfter": {
+                    "Move_file_into_processing": [
+                      "Succeeded"
+                    ]
+                  }
+                }
+              },
+              "runAfter": {}
+            },
+            "Delete_blob_from_processing": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "api": {
+                    "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/azureblob"
+                  },
+                  "connection": {
+                    "name": "@parameters('$connections')['azureblob']['connectionId']"
+                  }
+                },
+                "method": "delete",
+                "path": "/datasets/default/files/@{encodeURIComponent(encodeURIComponent(body('Move_file_into_processing')?['Path']))}"
+              },
+              "runAfter": {
+                "Condition": [
+                  "Succeeded"
+                ]
+              }
+            }
+          },
+          "parameters": {
+            "$connections": {
+              "defaultValue": {},
+              "type": "Object"
+            }
+          },
+          "triggers": {
+            "Poll_Azure_Blob_container": {
+              "type": "ApiConnection",
+              "inputs": {
+                "host": {
+                  "api": {
+                    "runtimeUrl": "https://logic-apis-westus2.azure-apim.net/apim/azureblob"
+                  },
+                  "connection": {
+                    "name": "@parameters('$connections')['azureblob']['connectionId']"
+                  }
+                },
+                "method": "get",
+                "path": "/datasets/default/triggers/batch/onupdatedfile",
+                "queries": {
+                  "folderId": "L2lucHV0",
+                  "maxFileCount": 10
+                }
+              },
+              "recurrence": {
+                "frequency": "Hour",
+                "interval": 15
+              },
+              "splitOn": "@triggerBody()",
+              "metadata": {
+                "L2lucHV0": "/input"
+              }
+            }
+          },
+          "contentVersion": "1.0.0.0",
+          "outputs": {}
+        },
+        "parameters": {
+          "$connections": {
+            "value": {
+              "dynamicsax": {
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', parameters('deployment-location'), '/managedApis/', 'dynamicsax')]",
+                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('dynamicsax_Connection_Name'))]",
+                "connectionName": "[parameters('dynamicsax_Connection_Name')]"
+              },
+              "azureblob": {
+                "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', parameters('deployment-location'), '/managedApis/', 'azureblob')]",
+                "connectionId": "[resourceId('Microsoft.Web/connections', parameters('azureblob_Connection_Name'))]",
+                "connectionName": "[parameters('azureblob_Connection_Name')]"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "MICROSOFT.WEB/CONNECTIONS",
+      "apiVersion": "2016-06-01",
+      "name": "[parameters('azureblob_Connection_Name')]",
+      "location": "[parameters('deployment-location')]",
+      "properties": {
+        "api": {
+          "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', parameters('deployment-location'), '/managedApis/', 'azureblob')]"
+        },
+        "displayName": "[parameters('azureblob_Connection_DisplayName')]",
+        "parameterValues": {
+          "accountName": "[parameters('azureblob_accountName')]",
+          "accessKey": "[parameters('azureblob_accessKey')]"
+        }
+      }
+    },
+    {
+      "type": "MICROSOFT.WEB/CONNECTIONS",
+      "apiVersion": "2016-06-01",
+      "name": "[parameters('dynamicsax_Connection_Name')]",
+      "location": "[parameters('deployment-location')]",
+      "properties": {
+        "api": {
+          "id": "[concat('/subscriptions/', subscription().subscriptionId, '/providers/Microsoft.Web/locations/', parameters('deployment-location'), '/managedApis/', 'dynamicsax')]"
+        },
+        "displayName": "[parameters('dynamicsax_Connection_DisplayName')]"
+      }
+    }
+  ],
+  "outputs": {}
+}
